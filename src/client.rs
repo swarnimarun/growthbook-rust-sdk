@@ -40,6 +40,25 @@ async fn updated_features_task(
     }
 }
 
+async fn updated_features_task_once(
+    growthbook_gateway: GrowthbookGateway,
+    config: Arc<RwLock<GrowthBook>>,
+) {
+    match growthbook_gateway.get_features(None).await {
+        Ok(new_config) => {
+            let mut writable_config = config.write().expect("problem to create mutex for gb data");
+            let updated_features = GrowthBook {
+                forced_variations: new_config.forced_variations,
+                features: new_config.features,
+            };
+            *writable_config = updated_features;
+        },
+        Err(e) => {
+            error!("[growthbook-sdk] Failed to fetch features from server: {:?}", e);
+        },
+    }
+}
+
 pub trait GrowthBookClientTrait: Debug + Send + Sync {
     fn is_on(
         &self,
@@ -88,6 +107,28 @@ impl GrowthBookClient {
         tokio::spawn(async move {
             updated_features_task(gb_gateway, gb_rw_clone, default_interval).await;
         });
+
+        Ok(GrowthBookClient { gb: growthbook_writable })
+    }
+
+    pub async fn new_with_wait(
+        api_url: &str,
+        sdk_key: &str,
+        http_timeout: Option<Duration>,
+    ) -> Result<Self, GrowthbookError> {
+        let default_timeout = http_timeout.unwrap_or_else(|| {
+            let seconds = Environment::u64_or_default("GB_HTTP_CLIENT_TIMEOUT", 10);
+            Duration::from_secs(seconds)
+        });
+        let gb_gateway = GrowthbookGateway::new(api_url, sdk_key, default_timeout)?;
+        let resp = gb_gateway.get_features(None).await?;
+        let growthbook_writable = Arc::new(RwLock::new(GrowthBook {
+            forced_variations: resp.forced_variations,
+            features: resp.features,
+        }));
+        let gb_rw_clone = Arc::clone(&growthbook_writable);
+
+        updated_features_task_once(gb_gateway, gb_rw_clone).await;
 
         Ok(GrowthBookClient { gb: growthbook_writable })
     }
